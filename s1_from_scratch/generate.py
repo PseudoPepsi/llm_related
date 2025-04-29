@@ -2,10 +2,15 @@ from vllm import LLM, SamplingParams # compared to transformers, vllm is easier 
 from transformers import AutoTokenizer
 
 MAX_TOKENS = 4096
+# load original model DS-R1-Distill-Qwen1.5B
 tokenizer = AutoTokenizer.from_pretrained("./DeepSeek-R1-Distill-Qwen-1.5B")
 llm = LLM(model="./DeepSeek-R1-Distill-Qwen-1.5B", gpu_memory_utilization=0.95)
-# tokenizer = AutoTokenizer.from_pretrained("./s1")
-# llm = LLM(model="./s1", gpu_memory_utilization=0.95)
+
+# load LoRA model Qwen0.5B
+# from peft import PeftModel
+# tokenizer = AutoTokenizer.from_pretrained("./Qwen2.5-0.5B-Instruct")
+# llm = LLM(model="./Qwen2.5-0.5B-Instruct", gpu_memory_utilization=0.95)
+# llm = PeftModel.from_pretrained(llm, "./s1") # load lora 
 
 sampling_params = SamplingParams(
     temperature=0,

@@ -1,3 +1,4 @@
+"""如果不用llamafactory,也可以用这个transformer代码训练一个"""
 from transformers import AutoTokenizer, AutoModelForCausalLM, Trainer, TrainingArguments
 from transformers import DefaultDataCollator
 from peft import LoraConfig, get_peft_model, TaskType
@@ -16,6 +17,7 @@ class S1Dataset(Dataset):
         self.tokenizer = tokenizer
         
     def __getitem__(self, index):
+        # 标准的处理llm训练数据输入的
         sample = self.ds[index]
         question = sample['question']
         gemini_thinking_trajectory = sample['gemini_thinking_trajectory']
@@ -29,8 +31,9 @@ class S1Dataset(Dataset):
         
         input_ids = q_input_ids + a_input_ids
         attention_mask = [1] * len(input_ids)
-        labels = [-100] * len(q_input_ids) + a_input_ids
+        labels = [-100] * len(q_input_ids) + a_input_ids # q不用计算loss，只有a需要，所以q设置-100
         
+        # 超过max_len截断；不到max_len填充
         if len(input_ids) > self.max_length:
             input_ids = input_ids[:self.max_length]
             attention_mask = attention_mask[:self.max_length]
@@ -47,9 +50,9 @@ class S1Dataset(Dataset):
         return len(self.ds)
 
 if __name__ == "__main__":
-
-    model = AutoModelForCausalLM.from_pretrained("/home/user/Downloads/Qwen2.5-0.5B-Instruct")
-    tokenizer = AutoTokenizer.from_pretrained("/home/user/Downloads/Qwen2.5-0.5B-Instruct")
+    # 标准Trainer流程，lora
+    model = AutoModelForCausalLM.from_pretrained("./Qwen2.5-0.5B-Instruct")
+    tokenizer = AutoTokenizer.from_pretrained("./Qwen2.5-0.5B-Instruct")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=8,
@@ -59,7 +62,7 @@ if __name__ == "__main__":
     )
 
     model = get_peft_model(model, lora_config)
-    model.print_trainable_parameters()
+    model.print_trainable_parameters() # total 0.5B, 4.4M trainable
 
     ds = load_dataset('./s1K-1.1')
     data_collator = DefaultDataCollator()
@@ -79,7 +82,8 @@ if __name__ == "__main__":
         bf16=True
     )
     
-    train_dataset = S1Dataset(ds['train'], tokenizer, max_length=1024)
+    MAX_LEN = 1024
+    train_dataset = S1Dataset(ds['train'], tokenizer, max_length=MAX_LEN) # 可设置的高一点
     trainer = Trainer(
         model=model,
         args=args,

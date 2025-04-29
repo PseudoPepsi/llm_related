@@ -1,16 +1,22 @@
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams # compared to transformers, vllm is easier to add stop
 from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("/home/user/Downloads/DeepSeek-R1-Distill-Qwen-1.5B")
-llm = LLM(model="/home/user/Downloads/DeepSeek-R1-Distill-Qwen-1.5B", gpu_memory_utilization=0.15)
+MAX_TOKENS = 4096
+tokenizer = AutoTokenizer.from_pretrained("./DeepSeek-R1-Distill-Qwen-1.5B")
+llm = LLM(model="./DeepSeek-R1-Distill-Qwen-1.5B", gpu_memory_utilization=0.95)
+# tokenizer = AutoTokenizer.from_pretrained("./s1")
+# llm = LLM(model="./s1", gpu_memory_utilization=0.95)
 
 sampling_params = SamplingParams(
     temperature=0,
-    max_tokens=32768,
+    max_tokens=MAX_TOKENS,
     skip_special_tokens=False
 )
 
-prompt = '9.11和9.8谁大？'
+# prompt = '9.11和9.8谁大？'
+# prompt = 'which is bigger, 9.11 or 9.8?'
+prompt = 'how many r in strawberry?'
+# Qwen template
 prompt = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n"
 
 # 模型原始输出部分
@@ -21,10 +27,11 @@ outputs = llm.generate(
 print(f'原始输出：{prompt}{outputs[0].outputs[0].text}')
 print('+'*20)
 
+# budget forcing 部分
 sampling_params = SamplingParams(
     temperature=0,
-    max_tokens=32768,
-    stop='</think>',
+    max_tokens=MAX_TOKENS,
+    stop='</think>', # 在输出中添加stop token
     skip_special_tokens=False
 )
 
@@ -33,7 +40,7 @@ outputs = llm.generate(
         sampling_params
     )
 wait = 'Wait'
-for i in range(1):
+for i in range(1): # #times to skip stop token
     prompt += outputs[0].outputs[0].text + wait
 
     outputs = llm.generate(
@@ -46,7 +53,7 @@ print('+'*20)
 prompt += outputs[0].outputs[0].text
 stop_token_ids = tokenizer("<|im_end|>")["input_ids"]
 sampling_params = SamplingParams(
-    max_tokens=32768,
+    max_tokens=MAX_TOKENS,
     min_tokens=0,
     stop_token_ids=stop_token_ids,
     skip_special_tokens=False,

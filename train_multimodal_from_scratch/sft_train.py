@@ -1,3 +1,4 @@
+"""sft"""
 from transformers import PreTrainedModel, PretrainedConfig, AutoTokenizer, AutoModelForCausalLM
 from PIL import Image
 import requests
@@ -43,7 +44,8 @@ class SFTDataset(Dataset):
         self.processor = processor
         self.config = config
         with open(self.data_path, 'r', encoding='utf-8') as f:
-            self.datas = json.load(f)   
+            # self.datas = json.load(f)   
+            self.datas = [json.loads(line) for line in f]
         
             
     def __len__(self):
@@ -52,19 +54,22 @@ class SFTDataset(Dataset):
     def __getitem__(self, index):
         sample = self.datas[index]
         try:
-            image_name = 'COCO_train2014_' + str(sample['image'])
+            # image_name = 'COCO_train2014_' + str(sample['image'])
+            image_name = sample['image']
             conversations = sample['conversations']
             messages = [{"role":"system", "content":'You are a helpful assistant.'}]
             for conversation in conversations:
-                if conversation['from'] == 'human':
-                    messages.append({"role":"user", "content":conversation['value']})
-                else:
-                    messages.append({"role":"assistant", "content":conversation['value']})
+                # if conversation['from'] == 'human':
+                #     messages.append({"role":"user", "content":conversation['value']})
+                # else:
+                #     messages.append({"role":"assistant", "content":conversation['value']})
+                messages.append(conversation)
             text = tokenizer.apply_chat_template(messages, \
                 tokenize=False, \
                 ).replace('<image>', '<|image_pad|>'*self.config.image_pad_num)
             # print(text)
             input_ids = tokenizer(text)['input_ids']
+            # 因为sft数据是多轮对话，这里要定位到模型回答的部分，计算这部分loss，指令部分不需要计算损失
             indexs = find_assistant_tokens(tokenizer, input_ids)
             labels = len(input_ids) * [tokenizer.pad_token_id]
             for index in indexs:
@@ -77,7 +82,6 @@ class SFTDataset(Dataset):
             
             pixel_values = self.processor(text=None, images=image)['pixel_values']
         except:
-            
             default_image = Image.new('RGB', (224, 224), color='white')
             pixel_values = self.processor(text=None, images=default_image)['pixel_values']
             q_text = self.tokenizer.apply_chat_template([{"role":"system", "content":'You are a helpful assistant.'}, {"role":"user", "content":"图片内容是什么\n<image>"}], \
@@ -118,22 +122,26 @@ class MyDataCollator:
 
 if __name__ == '__main__':
     config = VLMConfig()
-    processor = AutoProcessor.from_pretrained("/home/user/wyf/siglip-base-patch16-224")
-    tokenizer = AutoTokenizer.from_pretrained('/home/user/Downloads/Qwen2.5-0.5B-Instruct')
+    processor = AutoProcessor.from_pretrained("./siglip-base-patch16-224")
+    tokenizer = AutoTokenizer.from_pretrained('./Qwen2.5-0.5B-Instruct')
     AutoConfig.register("vlm_model", VLMConfig)
     AutoModelForCausalLM.register(VLMConfig, VLM)
-    model = AutoModelForCausalLM.from_pretrained('/home/user/wyf/train_multimodal_from_scratch/save/pretrain')
+    model = AutoModelForCausalLM.from_pretrained('./save/pretrain')
     
     for name, param in model.named_parameters():
+        # 只训练LLM 
         if 'linear' in name or 'vision_model':
             param.requires_grad = False
-        if 'llm_model' in name:
+        if 'llm_model' in name: 
             param.requires_grad = True
-    print(f'模型参数量为：{sum(p.numel() for p in model.parameters())}') 
+    print(f'模型参数量为：{sum(p.numel() for p in model.parameters())}')  # total 0.8B, vision 0.2B, llm 0.6B, linear1 3.5M
     print(f'模型可训练参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}') 
-    images_path = './sft_images'
-    data_path = './dataset/llava_instruct_230k.json'
-    output_dir = 'save/sft' 
+    images_path = './dataset/minimind-v_dataset/sft_images' # 158710
+    data_path = './dataset/minimind-v_dataset/sft_data.jsonl' 
+    # data_path = './dataset/Chinese-LLaVA-Vision-Instructions/LLaVA-Instruct-150K/translated/llava_instruct_150k.json' # 150k
+    # data_path = './dataset/llava_instruct_230k.json' # 230k
+    # output_dir = './save/sft' 
+    output_dir = './save/sft1' 
     args = TrainingArguments(
         output_dir=output_dir,
         do_train=True,
@@ -156,6 +164,7 @@ if __name__ == '__main__':
         data_collator=MyDataCollator(tokenizer)  
     )
     
-    trainer.train(resume_from_checkpoint=True)
-    trainer.save_model('save/sft')
+    trainer.train()
+    # trainer.train(resume_from_checkpoint=True)
+    trainer.save_model('./save/sft')
     trainer.save_state()

@@ -1,3 +1,5 @@
+"""train"""
+"""simply use transformers library"""
 from transformers import PreTrainedModel, PretrainedConfig, AutoTokenizer, AutoModelForCausalLM
 from PIL import Image
 import requests
@@ -16,9 +18,9 @@ from transformers import Trainer, TrainingArguments, DataCollatorWithPadding
 from typing import List, Dict, Any
 
 class VLMConfig(PretrainedConfig):
-    model_type = "vlm_model"
-    def __init__(self,llm_model_path = '/home/user/Downloads/Qwen2.5-0.5B-Instruct',
-                 vision_model_path = '/home/user/Downloads/siglip-so400m-patch14-384',
+    model_type = "vlm_model" # transformer need this to load model
+    def __init__(self,llm_model_path = './Qwen2.5-0.5B-Instruct',
+                 vision_model_path = './siglip-so400m-patch14-384',
                  freeze_vision_model = True,
                  image_pad_num = 49,
                 **kwargs):
@@ -39,25 +41,24 @@ class VLM(PreTrainedModel):
         self.processor = AutoProcessor.from_pretrained(self.config.vision_model_path)
         self.llm_model = AutoModelForCausalLM.from_pretrained(self.config.llm_model_path)
         self.tokenizer = AutoTokenizer.from_pretrained(self.config.llm_model_path)
-        self.linear1 = nn.Linear(self.vision_model.config.vision_config.hidden_size*4, self.llm_model.config.hidden_size)
-        self.linear2 = nn.Linear(self.llm_model.config.hidden_size, self.llm_model.config.hidden_size)
+        # align vision and text
+        self.linear1 = nn.Linear(self.vision_model.config.vision_config.hidden_size*4, self.llm_model.config.hidden_size) # *4: reduce image tokens and increase dim
+        self.linear2 = nn.Linear(self.llm_model.config.hidden_size, self.llm_model.config.hidden_size) 
+        # freeze vision model and llm, only train projector
         if self.config.freeze_vision_model:
             for param in self.vision_model.parameters():
                 param.requires_grad = False
         for param in self.llm_model.parameters():
-            
             param.requires_grad = False
         
     def forward(self, input_ids, labels, pixel_values, attention_mask=None):
-        text_embeds = self.llm_model.get_input_embeddings()(input_ids)
-        
-        image_embeds = self.vision_model.vision_model(pixel_values).last_hidden_state 
+        text_embeds = self.llm_model.get_input_embeddings()(input_ids) # (bs, seq_len, hidden_size=896)
+        image_embeds = self.vision_model.vision_model(pixel_values).last_hidden_state  # (bs, seq_len=(224/16)^2=196, hidden_size=768)
         b, s, d = image_embeds.shape
         image_embeds = image_embeds.view(b, -1, d*4)  # (b, 196, d) --> (b, 49, d*4) 压缩图片tokens
-        image_features = self.linear2(F.silu(self.linear1(image_embeds)))
-        
+        # project image emb to text emb space
+        image_features = self.linear2(F.silu(self.linear1(image_embeds))) # (bs, seq_len=seq_len/4=49, hidden_size=llm_hidden_size=896)
         text_embeds = text_embeds.to(image_features.dtype)
-        
         inputs_embeds = self.merge_input_ids_with_image_features(image_features, text_embeds, input_ids)
         outputs = self.llm_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
         logits = outputs[0]
@@ -70,12 +71,10 @@ class VLM(PreTrainedModel):
         return CausalLMOutputWithPast(loss=loss, logits=logits)
         
     def merge_input_ids_with_image_features(self, image_features, inputs_embeds, input_ids):
-        
+        """把占位符替换成实际的img emb"""
         num_images, num_image_patches, embed_dim = image_features.shape
         batch_indices, image_indices = torch.where(input_ids == self.tokenizer('<|image_pad|>')['input_ids'][0])
-        
         inputs_embeds[batch_indices, image_indices] = image_features.view(-1, embed_dim)
-        
         return inputs_embeds
     
 class MyDataset(Dataset):
@@ -98,21 +97,23 @@ class MyDataset(Dataset):
         try:
             image_name = sample['image']
             conversations = sample['conversations']
+            # 只取了conversation的第一轮
             q_text = self.tokenizer.apply_chat_template([{"role":"system", "content":'You are a helpful assistant.'}, {"role":"user", "content":conversations[0]['value']}], \
                 tokenize=False, \
-                add_generation_prompt=True).replace('<image>', '<|image_pad|>'*self.config.image_pad_num)
+                add_generation_prompt=True).replace('<image>', '<|image_pad|>'*self.config.image_pad_num) # 数据集格式替换成qwen2.5的图像占位符表示
             a_text = conversations[1]['value'] + self.tokenizer.eos_token
             q_input_ids = self.tokenizer(q_text)['input_ids']
             a_input_ids = self.tokenizer(a_text)['input_ids']
             input_ids = q_input_ids + a_input_ids
             labels = [tokenizer.pad_token_id] * len(q_input_ids) + a_input_ids
+            # 计算偏移，用当前的token算下一个token，注意transformer官方训练class已经有偏移了，这里自定义的class需要手动加上偏移
             input_ids = input_ids[:-1]
             labels = labels[1:]
-        
-            
+
             image = Image.open(os.path.join(self.images_path, image_name)).convert("RGB")
             pixel_values = self.processor(text=None, images=image)['pixel_values']
         except:
+            # 图片可能是损坏的->训练报错 : 直接替换成白底图片，描述'为空'
             default_image = Image.new('RGB', (224, 224), color='white')
             pixel_values = self.processor(text=None, images=default_image)['pixel_values']
             q_text = self.tokenizer.apply_chat_template([{"role":"system", "content":'You are a helpful assistant.'}, {"role":"user", "content":"图片内容是什么\n<image>"}], \
@@ -138,6 +139,8 @@ class MyDataCollator:
         self.tokenizer = tokenizer
     
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        '''对训练batch内数据长度需要是一样的
+        因此增加这个后处理,全部填充为batch内最长的长度'''
         max_len = max(len(feature['input_ids']) for feature in features)
         input_ids = []
         labels = []
@@ -154,15 +157,17 @@ class MyDataCollator:
         
         
 if __name__ == '__main__':
-    config = VLMConfig(vision_model_path='/home/user/wyf/siglip-base-patch16-224', image_pad_num=49)
+    # transformer trainer的标注训练流程
+    config = VLMConfig(vision_model_path='./siglip-base-patch16-224', image_pad_num=49)
     model = VLM(config).cuda()
     print(model)
-    print(f'模型参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}')
-    images_path = './dataset/LLaVA-CC3M-Pretrain-595K/images'
-    data_path = './dataset/Chinese-LLaVA-Vision-Instructions/LLaVA-CC3M-Pretrain-595K/chat-translated.json'
+    print(f'模型参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}') # total 0.7B, linear 3.5M, siglip 0.2B, Qwen0.5B
+
+    images_path = './dataset/LLaVA-CC3M-Pretrain-595K/images' # 595375 images   
+    data_path = './dataset/Chinese-LLaVA-Vision-Instructions/LLaVA-CC3M-Pretrain-595K/chat-translated.json' # 595k
     tokenizer = AutoTokenizer.from_pretrained(config.llm_model_path)
     processor = AutoProcessor.from_pretrained(config.vision_model_path)
-    output_dir = 'save/pretrain' 
+    output_dir = './save/pretrain' 
     args = TrainingArguments(
         output_dir=output_dir,
         do_train=True,
@@ -187,9 +192,5 @@ if __name__ == '__main__':
     
     trainer.train(resume_from_checkpoint=False)
     trainer.save_model('save/pretrain')
+    # trainer.save_model('save/pretrain_1')
     trainer.save_state()
-    
-    
-
-    
-    

@@ -1,3 +1,10 @@
+"""简单的transformers实现KD
+蒸馏方法
+1. 黑盒KD: 大模型生成数据，用来微调小模型
+2. 白盒KD
+    1. 对模型的output做KD -- 这里用的KD方式
+    2. 对中间层feature做KD
+"""
 from transformers import AutoModelForCausalLM, AutoTokenizer, DefaultDataCollator
 from peft import LoraConfig, get_peft_model, TaskType
 from peft import PeftModel
@@ -13,9 +20,9 @@ class KGTrainer(Trainer):
     
     def __init__(
         self,
-        model = None,
-        teacher_model = None,
-        if_use_entropy = False,
+        model = None, # student model
+        teacher_model = None, # teacher model
+        if_use_entropy = False, # whether use cross entropy loss
         args = None,
         data_collator = None, 
         train_dataset = None,
@@ -44,31 +51,41 @@ class KGTrainer(Trainer):
         self.if_use_entropy = if_use_entropy
         
     
+    # 重写loss计算
     def compute_loss(self, model, inputs, return_outputs=False):
         
-        outputs = model(**inputs)
+        outputs = model(**inputs) # student model output
         with torch.no_grad():
-            teacher_outputs = self.teacher_model(**inputs)
+            teacher_outputs = self.teacher_model(**inputs) # freeze teacher model
         
-        loss = outputs.loss
-        logits = outputs.logits
-        teacher_logits = teacher_outputs.logits
+        loss = outputs.loss # student loss
+        logits = outputs.logits # student logits
+        teacher_logits = teacher_outputs.logits # teacher logits
         
         # 如果教师模型和学生模型输出形状不匹配，对学生模型进行padding或对教师模型进行截断
+        # 同系列不同参数的模型应该是可以的（比如qwen2.5，词表是一样的)，不过维度也不能差太多
+        # 不同系列的就没法直接通过截断这种方法了，要加其他处理
+        # 注意截断的不是隐藏层维度，其实是模型分类头最后输出的词表大小那个维度
+        # Qwen2.5 3B KD 0.5B, 输出维度一样 -> 不需要调整
+        # 但如果用更大的7B, 14B, 32B KD， 输出shape不一样 -> 需要处理
         if logits.shape[-1] != teacher_logits.shape[-1]:
+            # process method 1: 对学生模型进行padding
             # gap = teacher_logits.shape[-1] - logits.shape[-1]
             # if gap > 0:
             #     pad_logits = torch.zeros((logits.shape[0], logits.shape[1], gap)).to(logits.device)
             #     logits = torch.cat([logits, pad_logits], dim=-1)
-            
+            # process method 2: 对教师模型进行截断
             teacher_logits = teacher_logits[:, :, :logits.shape[-1]]
         
         labels = inputs['labels']
-        kl = compute_fkl(logits, teacher_logits, labels, padding_id=-100, temp=2.0)
+        # pad with -100: transformers默认的pad token id
+        kl = compute_fkl(logits, teacher_logits, labels, padding_id=-100, temp=2.0) 
         
         if self.if_use_entropy:
+            # 用KL散度+ce做最终损失
             loss_total = 0.5 * kl + 0.5 * loss
         else:
+            # 直接用kl散度做最终损失
             loss_total = kl
         
         return (loss_total, outputs) if return_outputs else loss_total

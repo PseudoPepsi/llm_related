@@ -1,3 +1,6 @@
+"""use llamafactory dataset
+instruction, input, output
+"""
 import math
 from typing import List, Optional, Tuple, Union
 import torch
@@ -42,18 +45,19 @@ class SFTDataset(Dataset):
         prompt_input_ids = self.tokenizer.encode(prompt)
         answer_input_ids = self.tokenizer.encode(answer)
         
-        input_ids = prompt_input_ids + answer_input_ids
-        labels = [-100] * len(prompt_input_ids) + answer_input_ids
-        attention_mask = [1] * len(input_ids)
+        input_ids = prompt_input_ids + answer_input_ids # input = prompt + answer
+        labels = [-100] * len(prompt_input_ids) + answer_input_ids # 只需要计算answer部分的loss
+        attention_mask = [1] * len(input_ids) 
         text_len = len(input_ids)
         
-        if text_len > self.max_seq_len:
+        # 一个batch保证长度一样
+        if text_len > self.max_seq_len: # 大雨于最大长度，截断
             input_ids = input_ids[:self.max_seq_len]
             labels = labels[:self.max_seq_len]
             attention_mask = attention_mask[:self.max_seq_len]
-        else:
+        else: # 小于最大长度，padding
             input_ids = input_ids + [self.tokenizer.pad_token_id] * (self.max_seq_len - text_len)
-            labels = labels + [-100] * (self.max_seq_len - text_len)
+            labels = labels + [-100] * (self.max_seq_len - text_len) # 填充部分不计算loss
             attention_mask = attention_mask + [0] * (self.max_seq_len - text_len)
         
         # input_ids = input_ids[:-1]

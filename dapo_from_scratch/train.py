@@ -1,10 +1,8 @@
 from transformers import AutoModelForCausalLM, AutoModel, AutoModelForSequenceClassification, AutoTokenizer, PreTrainedModel
 from dataclasses import dataclass
 from typing import Optional, Union, Tuple
-import random
 import torch
 import torch.nn.functional as F
-import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from typing import Callable, Dict, List, Optional, Tuple, Union, Any
@@ -57,7 +55,8 @@ class GRPOArguments:
     max_generate_length = 256 # 最大输出长度
     reward_weights : List[float] = None # 奖励的权重（多个奖励函数）
     beta = 0.0 # KL散度的系数，为0则忽略KL散度，即不使用参考模型
-    clip_eps = 0.2
+    clip_eps_high = 0.28
+    clip_eps_low = 0.2
     gradient_accumulation_steps = 2 # 梯度累加
     num_iterations = 1 # 采样一次样本训练模型轮数
     batch_size = 1
@@ -206,20 +205,8 @@ class GRPOTrainer:
             action_mask = samples.action_mask # shape: (num_generations, seq_len)
             num_actions = samples.num_actions
             prompt = samples.prompt
-            batch_prompt_response_ids.append(prompt_response_ids)
-            batch_attention_mask.append(attention_mask)
-            batch_action_mask.append(action_mask)
             
             with torch.no_grad():
-                # 计算策略模型输出token的概率
-                old_action_log_probs = self.get_action_log_probs(self.model, prompt_response_ids, attention_mask, num_actions)
-                batch_old_action_log_probs.append(old_action_log_probs)
-                
-                # 是否使用参考模型
-                if self.ref_model:
-                    #计算参考模型输出token的概率
-                    ref_action_log_probs = self.get_action_log_probs(self.ref_model, prompt_response_ids, attention_mask, num_actions)
-                    batch_ref_action_log_probs.append(ref_action_log_probs)
                 
                 # 存储各个奖励函数在一个group内各个响应的奖励
                 rewards_per_func = torch.zeros(len(self.reward_funcs), self.args.num_generations, device=self.args.device)
@@ -250,25 +237,45 @@ class GRPOTrainer:
                     raise ValueError("The number of reward weights must be equal to the number of reward functions.")
                 # 乘以各个奖励函数的权重
                 rewards = rewards_per_func * torch.tensor(self.args.reward_weights, dtype=torch.float32, device=rewards_per_func.device).unsqueeze(1)
-                
                 # rewards: [num_funcs, num_generations]
                 rewards = rewards.sum(dim=0) # shape: [num_generations]
                 print(f'rewards: {rewards}')
+                
                 mean_group_rewards = rewards.mean()
                 std_group_rewards = rewards.std()
                 
                 # GRPO的优势是句子粒度的，而非token粒度的
                 advantages = (rewards - mean_group_rewards) / (std_group_rewards + 1e-8) # shape: [num_generations]
+                # 统计优势中非零元素的数量，如果为0，则说明该组中的优势全为0，舍弃该组数据(对更新模型没有用)
+                nonzero_num = advantages.count_nonzero().item()
+                if nonzero_num == 0:
+                    continue
+                
                 batch_advantages.append(advantages)
+                
+                # 计算策略模型输出token的概率
+                old_action_log_probs = self.get_action_log_probs(self.model, prompt_response_ids, attention_mask, num_actions)
+                batch_old_action_log_probs.append(old_action_log_probs)
+                
+                # 是否使用参考模型
+                if self.ref_model:
+                    #计算参考模型输出token的概率
+                    ref_action_log_probs = self.get_action_log_probs(self.ref_model, prompt_response_ids, attention_mask, num_actions)
+                    batch_ref_action_log_probs.append(ref_action_log_probs)
+                    
+                
+                batch_prompt_response_ids.append(prompt_response_ids)
+                batch_attention_mask.append(attention_mask)
+                batch_action_mask.append(action_mask)
         
                
         return {
-            "prompt_response_ids": torch.cat(batch_prompt_response_ids, dim=0),
-            "attention_mask": torch.cat(batch_attention_mask, dim=0),
-            "action_mask": torch.cat(batch_action_mask, dim=0),
-            "old_action_log_probs": torch.cat(batch_old_action_log_probs, dim=0),
-            "ref_action_log_probs": torch.cat(batch_ref_action_log_probs, dim=0) if self.ref_model else None,
-            "advantages": torch.cat(batch_advantages, dim=0),
+            "prompt_response_ids": batch_prompt_response_ids,
+            "attention_mask": batch_attention_mask,
+            "action_mask": batch_action_mask,
+            "old_action_log_probs": batch_old_action_log_probs,
+            "ref_action_log_probs": batch_ref_action_log_probs if self.ref_model else None,
+            "advantages": batch_advantages,
         }
     
     def compute_loss(self, model, inputs):
@@ -292,18 +299,28 @@ class GRPOTrainer:
         
         old_action_log_probs = inputs['old_action_log_probs'] if self.args.num_iterations > 1 else action_log_probs.detach()
         coef_1 = torch.exp(action_log_probs - old_action_log_probs) # 重要性采样 shape: [batch_size * num_generations, num_actions]
-        coef_2 = torch.clamp(coef_1, 1 - self.args.clip_eps, 1 + self.args.clip_eps)
+        coef_2 = torch.clamp(coef_1, 1 - self.args.clip_eps_low, 1 + self.args.clip_eps_high)
         per_token_loss1 = coef_1 * advantages.unsqueeze(1) # 一个序列中每个token的优势是一样的
         per_token_loss2 = coef_2 * advantages.unsqueeze(1)
-        per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
-        per_token_loss = per_token_loss * action_mask
+        per_token_loss = -torch.min(per_token_loss1, per_token_loss2) # shape: [batch_size * num_generations, num_actions]
+        per_token_loss = per_token_loss * action_mask  
         if self.args.beta != 0.0:
             per_token_loss = per_token_loss + self.args.beta * k3
         
-        loss = per_token_loss.sum(dim=1) / action_mask.sum(dim=1) # shape: [batch_size * num_generations]
-        loss = loss.mean()
+        # GRPO loss
+        # loss = (per_token_loss.sum(dim=1) / action_mask.sum(dim=1)) shape: [batch_size * num_generations]
+        # loss = loss.mean()
         
-        # loss = per_token_loss.sum() / action_mask.sum()
+        
+        # DAPO loss
+        # per_token_loss = per_token_loss.view(-1, self.args.num_generations, num_actions) #  shape: [batch_size, num_generations, num_actions]
+        # loss = per_token_loss.sum(-1).sum(-1) / action_mask.sum(-1).sum(-1) # shape: [batch_size]
+        # loss = loss.mean()
+        
+        per_token_loss = per_token_loss.view(-1, self.args.num_generations, num_actions) #  shape: [batch_size, num_generations, num_actions]
+        action_mask = action_mask.view(-1, self.args.num_generations, num_actions)
+        loss = per_token_loss.sum(-1).sum(-1) / action_mask.sum(-1).sum(-1) # shape: [batch_size]
+        loss = loss.mean()
         
         return loss
 
@@ -345,10 +362,46 @@ class GRPOTrainer:
         for _ in range(self.args.epoch):
             
             dataloader = DataLoader(self.train_dataset, batch_size=self.args.batch_size, shuffle=True)
-            for idx, batch in enumerate(dataloader):
-                
+            buffer = {'prompt_response_ids':[],
+                      'attention_mask':[],
+                      'action_mask':[],
+                      'old_action_log_probs':[],
+                      'ref_action_log_probs':[],
+                      'advantages':[]}
+            idx = 0
+            for batch in dataloader:
+
                 inputs = self.generate_experiences(batch)
+                buffer['prompt_response_ids']+=inputs['prompt_response_ids']
+                buffer['attention_mask']+=inputs['attention_mask']
+                buffer['action_mask'] += inputs['action_mask']
+                buffer['old_action_log_probs'] += inputs['old_action_log_probs']
+                if self.ref_model is not None:
+                    buffer['ref_action_log_probs'] += inputs['ref_action_log_probs']
+                else:
+                    buffer['ref_action_log_probs'] = None
+                
+                buffer['advantages'] +=inputs['advantages']
+                
+             
+                # 如果生成的样本batch_size小于设定的batch_size，说明生成数据过程中有舍弃数据，需要继续采样，凑够一个完整的batch_size
+         
+                if len(buffer['prompt_response_ids']) < self.args.batch_size:
+                    continue
+                
+                if self.ref_model is not None:
+                    inputs = {k: v[:self.args.batch_size] for k, v in buffer.items()}
+                    inputs = {k: torch.cat(v, dim=0) for k, v in inputs.items()}
+                    buffer = {k: v[self.args.batch_size:] for k, v in buffer.items()}
+                    
+                else:
+                    inputs = {k: v[:self.args.batch_size] for k, v in buffer.items() if k != 'ref_action_log_probs'}
+                    inputs = {k: torch.cat(v, dim=0) for k, v in inputs.items()}
+                    inputs['ref_action_log_probs'] = None
+                    buffer = {k: v[self.args.batch_size:] for k, v in buffer.items() if k != 'ref_action_log_probs'}
+                    buffer['ref_action_log_probs'] = None
                 self.input_buffer[idx % self.args.gradient_accumulation_steps] = inputs
+
                 if (idx + 1) % self.args.gradient_accumulation_steps == 0:
                    
                     for _ in range(self.args.num_iterations):
@@ -359,7 +412,9 @@ class GRPOTrainer:
                         if self.update_steps % self.args.save_steps == 0:
                             self.model.save_pretrained(self.args.output_dir + f'/checkpoint_{self.update_steps}')
                             self.tokenizer.save_pretrained(self.args.output_dir + f'/checkpoint_{self.update_steps}')
-                        
+                
+                idx += 1
+                   
                 del inputs
     def save_model(self):
         self.model.save_pretrained(self.args.output_dir)
@@ -383,8 +438,8 @@ if __name__ == "__main__":
     
     writer = SummaryWriter('./runs')
     # 策略模型
-    tokenizer = AutoTokenizer.from_pretrained('/home/user/Downloads/Qwen2.5-1.5B-Instruct')
-    model = AutoModelForCausalLM.from_pretrained('/home/user/Downloads/Qwen2.5-1.5B-Instruct')
+    tokenizer = AutoTokenizer.from_pretrained('/home/user/Downloads/Qwen2.5-3B-Instruct')
+    model = AutoModelForCausalLM.from_pretrained('/home/user/Downloads/Qwen2.5-3B-Instruct')
     # 奖励函数
     # reward_model = '/home/user/Downloads/reward-model-deberta-v3-large-v2'
     # reward_tokenizer = AutoTokenizer.from_pretrained('/home/user/Downloads/reward-model-deberta-v3-large-v2')

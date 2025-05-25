@@ -63,7 +63,7 @@ class RotaryEmbedding(nn.Module):
         return apply_rotate_pos_emb(q, k, cos, sin)
     
 def repeat_kv(hidden_states, n_rep):
-    
+    """for GQA, it is needed to repeat k, v"""
     batch, slen, num_key_value_heads, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
@@ -90,10 +90,14 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=config.attention_bias)
         self.residual_dropout = nn.Dropout(self.dropout)
         self.attention_dropout = nn.Dropout(self.dropout)
-        self.rotary_emb = RotaryEmbedding(self.head_dim)
+        self.rotary_emb = RotaryEmbedding(self.head_dim) # rope不像绝对位置编码直接相加；而是在qk相乘时，引入位置信息给模型
         
     def forward(self, hidden_states, use_kv_cache=False):
         b, s = hidden_states.shape[:2]
+        # kvcache简单实现
+        # 自回归->用之前生成的token预测下一个token
+        # 已经计算过/生成的token，注意力不会发生变化，所以不用重复计算，而是cache起来
+        # 只计算当前token和历史token的注意力
         if use_kv_cache and self.eval():
             if self.k_cache is None or self.k_cache.shape[1] != s-1:
                 q, k, v = self.q_proj(hidden_states), self.k_proj(hidden_states), self.v_proj(hidden_states)
@@ -111,8 +115,11 @@ class Attention(nn.Module):
         k = k.view(b, s, self.num_key_value_heads, self.head_dim)
         v = v.view(b, s, self.num_key_value_heads, self.head_dim)
         
+        # 传统位置编码是和qk embedding相加，再输入到模型
+        # ROPE是在qk相乘时，引入位置信息给
         q, k = self.rotary_emb(q, k)
-        
+
+        # GQA 重复k,v（每组里q的数量）次
         k = repeat_kv(k, self.num_key_value_groups)
         v = repeat_kv(v, self.num_key_value_groups)
         
@@ -120,6 +127,7 @@ class Attention(nn.Module):
         k = k.transpose(1, 2) # b, self.num_heads, s, self.head_dim
         v = v.transpose(1, 2) # b, self.num_heads, s, self.head_dim
         
+        # FA: 分块注意力加速
         if self.flash_attn:
         
             # q*k转置，（b, self.num_heads, s, self.head_dim）* (b, self.num_heads, self.head_dim，s) = （b, self.num_heads, s, s）
@@ -174,7 +182,7 @@ class DecoderLayer(nn.Module):
     ):
         residual = hidden_states
 
-        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states) # LN
 
         # Self Attention
         hidden_states = self.self_attn(
@@ -185,7 +193,7 @@ class DecoderLayer(nn.Module):
         hidden_states = residual + hidden_states
         # Fully Connected
         residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states) # LN
         hidden_states = self.mlp(hidden_states)
         outputs = residual + hidden_states
         return outputs
@@ -241,7 +249,7 @@ class LLM(PreTrainedModel):
             self.layers.append(DecoderLayer(self.config, layer_idx)) 
         self.norm = RMSNorm(self.config.hidden_size)
         self.output = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False) 
-        self.tokon_embeddings.weight = self.output.weight
+        self.tokon_embeddings.weight = self.output.weight # 这里共享了embedding层参数和最终输出层参数, 所以trainer args不能设置save_safetensors
         self.apply(self._init_weights) 
         self.loss = None 
         
@@ -260,16 +268,17 @@ class LLM(PreTrainedModel):
         
     def forward(self, input_ids, labels, use_kv_cache=False):
        
-        hidden_states = self.tokon_embeddings(input_ids) 
+        hidden_states = self.tokon_embeddings(input_ids) # embedding
         hidden_states = self.dropout(hidden_states)  
         for idx, layer in enumerate(self.layers):
-            hidden_states = layer(hidden_states, use_kv_cache=use_kv_cache)  
+            hidden_states = layer(hidden_states, use_kv_cache=use_kv_cache)   # many decoder layer
 
-        hidden_states = self.norm(hidden_states) 
+        hidden_states = self.norm(hidden_states)  # norm
 
         if labels is not None:
             logits = self.output(hidden_states)  
-            self.loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=0) 
+            # 注意这里计算loss的时候，理论上需要一个偏移（一个token的标签是下一个token)，如果dataset里做了偏移，这里就不用做了
+            self.loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=0)  # cross entropy loss
         else:
             logits = self.output(hidden_states[:, [-1], :])  
             self.loss = None  
@@ -335,6 +344,7 @@ if __name__ == '__main__':
                             dataloader_num_workers=8,
                             dataloader_pin_memory=True,
                             save_safetensors=False)          
+    # TODO:
     dataset = LLMDataset('./mobvoi_seq_monkey_general_open_corpus.jsonl', tokenizer=tokenizer, max_seq_len=512)
     trainer = Trainer(model=model, args=args, train_dataset=dataset, tokenizer=tokenizer, data_collator=data_collator)
     # 如果是初次训练resume_from_checkpoint为false，接着checkpoint继续训练，为True

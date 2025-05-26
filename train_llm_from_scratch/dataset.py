@@ -32,14 +32,16 @@ class LLMDataset(Dataset):
         
         line = self.data[index]
         line = json.loads(line)
-        text = '<s>' + line['text'] + '</s>'
+        text = '<s>' + line['text'] + '</s>' # 这里加上开始和结束
         input_ids = self.tokenizer.encode(text)
         text_len = len(input_ids)
+        # 截断or填充固定长度
         if text_len > self.max_seq_len:
             input_ids = input_ids[:self.max_seq_len]
         else:
             input_ids = input_ids + [0] * (self.max_seq_len - text_len)
         input_ids = np.array(input_ids)
+        # 数据偏移
         X = np.array(input_ids[:-1]).astype(np.int64)
         Y = np.array(input_ids[1:]).astype(np.int64)
         return {
@@ -70,6 +72,7 @@ class SFTDataset(Dataset):
         query = instruction_text + input_text
         answer = output_text + self.tokenizer.eos_token
         messages = []
+        # 处理历史输入
         if history:
             for i in history:
                 messages.append({'role': 'user', 'content': i[0]})
@@ -80,7 +83,7 @@ class SFTDataset(Dataset):
         prompt_input_ids = self.tokenizer.encode(prompt)
         answer_input_ids = self.tokenizer.encode(answer)
         input_ids = prompt_input_ids + answer_input_ids
-        labels = [0] * len(prompt_input_ids) + answer_input_ids
+        labels = [0] * len(prompt_input_ids) + answer_input_ids # 只计算模型回答的loss
         text_len = len(input_ids)
         if text_len > self.max_seq_len:
             input_ids = input_ids[:self.max_seq_len]
@@ -95,6 +98,7 @@ class SFTDataset(Dataset):
     
     
 # 内存不够，可使用如下方法加载数据
+# 不用一次性加载所有数据，而是每次迭代时加载一部分数据，避免一次性加载到内存
 # class LLMDataset(IterableDataset):
 #     def __init__(self, data_path, tokenizer, max_seq_len):
 #         super().__init__()

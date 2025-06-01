@@ -14,17 +14,24 @@ def logits_to_probs(logits, labels):
     return probs
 
 def mask_logits(logits, labels):
+    """把padding部分的概率去掉,只保留没有padding的部分"""
     # logits shape: (batch_size, seq_len, vocab_size)
     # labels_masks shape: (batch_size, seq_len)
     new_logits = []
     for logit, label in zip(logits, labels):
-        new_logits.append(logit[label != 0].sum().unsqueeze(0))
+        new_logits.append(logit[label != 0].sum().unsqueeze(0)) # 这里的概率是log prob，所以直接相加就可以了
     
     return new_logits
 
 
 def dpo_loss(ref_probs, probs, beta):
+    """对照dpo公式看"""
     def split_probs(probs):
+        """把probs分为两份,一份是chosen的,一份是reject的
+        这里在dataset.py DPODataset, DPODataCollator中已经把chosen和reject的部分分开了
+        一个batch钟好的回答放batch前面,坏的回答放在batch后面
+        实际输入模型的batch是实际指定batch的两倍
+        """
         len_chosen = int(len(probs) // 2)
         chosen_data = probs[:len_chosen]
         reject_data = probs[len_chosen:]
@@ -32,30 +39,40 @@ def dpo_loss(ref_probs, probs, beta):
     
     ref_chosen_probs, ref_reject_probs = split_probs(ref_probs)
     chosen_probs, reject_probs = split_probs(probs)
+
     pi_logratios = chosen_probs - reject_probs
     ref_logratios = ref_chosen_probs - ref_reject_probs
+
     logits = pi_logratios - ref_logratios
+
     loss = -F.logsigmoid(beta*logits)
     return loss.mean()
     
 
 
 class DPOTrainer(Trainer):
+    """在transformers的DPO训练,只需要继承trainer,修改loss就可以了"""
     
+    # NOTE: 重点看这个loss
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         input_ids = inputs['input_ids']
         labels = inputs['labels']
+
         with torch.no_grad():
-            ref_logits = ref_model(input_ids=input_ids, labels = labels).logits
-        ref_probs = logits_to_probs(ref_logits, labels)
-        ref_probs = mask_logits(ref_probs, labels)
+            ref_logits = ref_model(input_ids=input_ids, labels = labels).logits 
+        ref_probs = logits_to_probs(ref_logits, labels)  
+        ref_probs = mask_logits(ref_probs, labels) # pi_ref
+
         logits = model(input_ids=input_ids, labels = labels).logits
         probs = logits_to_probs(logits, labels)
-        probs = mask_logits(probs, labels)
+        probs = mask_logits(probs, labels) # pi_theta
+
         loss = dpo_loss(ref_probs, probs, 0.1)
         return loss
 
     # def training_step(
+    """这里也修改了训练函数，但实际上不需要用到
+    这里主要的改动是,ref_model的结果复用"""
     #     self, model, inputs, num_items_in_batch=None
     # ) -> torch.Tensor:
     #     input_ids = inputs['input_ids']
@@ -119,13 +136,15 @@ if __name__ == "__main__":
                             report_to='tensorboard',
                             save_total_limit=3,
                             bf16=True,
-                            learning_rate=0.00001,  # 学习率很重要，太大会把模型训飞
+                            learning_rate=0.00001,  # DPO学习率很重要!太大会把模型训飞
                             lr_scheduler_type='cosine',
                             dataloader_num_workers=1,
                             dataloader_pin_memory=True,
                             save_safetensors=False,
                             save_steps=100)          
-    dataset = DPODataset('/home/user/wyf/train_model_from_scratch/dataset/dpo_data_512.json', tokenizer=tokenizer)
+
+    # dataset: https://huggingface.co/datasets/jingyaogong/minimind_dataset
+    dataset = DPODataset('/home/user/wyf/train_model_from_scratch/dataset/dpo_data_512.json', tokenizer=tokenizer) # 这里只保留了长度小于512的样本
     trainer = DPOTrainer(model=model, args=args, train_dataset=dataset, tokenizer=tokenizer, data_collator=data_collator)
     
     # 如果是初次训练resume_from_checkpoint为false，接着checkpoint继续训练，为True

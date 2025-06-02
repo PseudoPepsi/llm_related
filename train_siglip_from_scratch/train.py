@@ -6,8 +6,8 @@ from transformers import ViTImageProcessor, ViTForImageClassification
 
 def train():
     
-    config = SiglipConfig(vision_model_name_or_path='/home/user/wyf/train_siglip_from_scratch/vit-base-patch16-224',
-                          text_model_name_or_path='/home/user/wyf/chinese-roberta-wwm-ext')
+    config = SiglipConfig(vision_model_name_or_path='/home/user/wyf/train_siglip_from_scratch/vit-base-patch16-224', # patch 16, 224*224 vit
+                          text_model_name_or_path='/home/user/wyf/chinese-roberta-wwm-ext') # roberta in CN
     
     model = SiglipModel(config)
     tokenizer = AutoTokenizer.from_pretrained(config.text_model_name_or_path)
@@ -29,7 +29,7 @@ def train():
         dataloader_num_workers=1,
     )
     dataset = SiglipDataset(text_data_path='/home/user/wyf/train_siglip_from_scratch/MUGE/all_texts.jsonl',
-                            image_data_path='/home/user/wyf/train_siglip_from_scratch/MUGE/all_imgs.tsv',
+                            image_data_path='/home/user/wyf/train_siglip_from_scratch/MUGE/all_imgs.tsv', # 这里改成tsv格式
                             tokenizer=tokenizer,
                             processor=processor,
                             max_seq_length=64)

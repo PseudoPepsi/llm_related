@@ -39,6 +39,7 @@ class SiglipModel(PreTrainedModel):
         self.process = AutoProcessor.from_pretrained(config.vision_model_name_or_path)
         self.text_model = AutoModel.from_pretrained(config.text_model_name_or_path)
         self.tokenizer = AutoTokenizer.from_pretrained(config.text_model_name_or_path)
+        # t, b : refer to siglip formula
         self.t = nn.Parameter(torch.randn(1))
         self.b = nn.Parameter(torch.randn(1))
         
@@ -53,15 +54,17 @@ class SiglipModel(PreTrainedModel):
         vision_features = vision_outputs[1] # pooler_output
         text_features = text_outputs[1] # pooler_output
         
-        vision_features = vision_features / vision_features.norm(p=2, dim=-1, keepdim=True) # l2标准化
-        text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True) # l2标准化
+        vision_features = vision_features / vision_features.norm(p=2, dim=-1, keepdim=True) # l2标准化 -> x_i
+        text_features = text_features / text_features.norm(p=2, dim=-1, keepdim=True) # l2标准化 -> y_j
         
-        logits_per_text = torch.matmul(text_features, vision_features.t()) * self.t.exp() + self.b
+        logits_per_text = torch.matmul(text_features, vision_features.t()) * self.t.exp() + self.b # x_i * y_j
         logits_per_image = logits_per_text.t()
         
         b = logits_per_text.shape[0]
-        eye = torch.eye(b, device=logits_per_text.device) # 生成单位矩阵
+        eye = torch.eye(b, device=logits_per_text.device) # 生成单位矩阵 b*b
+        # label matrix z_ij
         labels = 2*eye - torch.ones_like(logits_per_text, device=logits_per_text.device) # 对角线全为1，非对角线为-1，即成对的图文标签为1，非成对的为-1
+
         loglik = F.logsigmoid(labels * logits_per_text)
         nll = -torch.sum(loglik, dim=-1)
         loss = nll.mean()

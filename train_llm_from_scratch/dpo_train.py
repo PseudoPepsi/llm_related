@@ -119,12 +119,12 @@ class DPOTrainer(Trainer):
 if __name__ == "__main__":
     AutoConfig.register("small_model", Config)
     AutoModelForCausalLM.register(Config, LLM)
-    model = AutoModelForCausalLM.from_pretrained('/home/user/wyf/train_model_from_scratch/saves/sft')
+    model = AutoModelForCausalLM.from_pretrained('./saves/sft')
 
-    print(f'模型可训练参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}')
-    ref_model = AutoModelForCausalLM.from_pretrained('/home/user/wyf/train_model_from_scratch/saves/sft').eval().to('cuda')
+    print(f'模型可训练参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}') # 38M
+    ref_model = AutoModelForCausalLM.from_pretrained('./saves/sft').eval().to('cuda')
     
-    tokenizer = AutoTokenizer.from_pretrained("/home/user/wyf/train_model_from_scratch/tokenizer", use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained("./tokenizer", use_fast=True)
     data_collator = DPODataCollator(tokenizer, max_seq_len=512) # 加载的大模型旋转位置编码最大长度为1024，这里不能超过这个值
     args = TrainingArguments(output_dir='./dpo-1-epoch', 
                             num_train_epochs=1,  # 训练太多轮，模型似乎会输出很多重复内容
@@ -136,7 +136,8 @@ if __name__ == "__main__":
                             report_to='tensorboard',
                             save_total_limit=3,
                             bf16=True,
-                            learning_rate=0.00001,  # DPO学习率很重要!太大会把模型训飞
+                            # learning_rate=0.00001,  # DPO学习率很重要!太大会把模型训飞
+                            learning_rate=0.000001,  # DPO学习率很重要!太大会把模型训飞
                             lr_scheduler_type='cosine',
                             dataloader_num_workers=1,
                             dataloader_pin_memory=True,
@@ -144,7 +145,8 @@ if __name__ == "__main__":
                             save_steps=100)          
 
     # dataset: https://huggingface.co/datasets/jingyaogong/minimind_dataset
-    dataset = DPODataset('/home/user/wyf/train_model_from_scratch/dataset/dpo_data_512.json', tokenizer=tokenizer) # 这里只保留了长度小于512的样本
+    # dataset = DPODataset('/home/user/wyf/train_model_from_scratch/dataset/dpo_data_512.json', tokenizer=tokenizer) # 这里只保留了长度小于512的样本
+    dataset = DPODataset('./dataset/minimind_dataset/dpo.jsonl', tokenizer=tokenizer) # 这里只保留了长度小于512的样本
     trainer = DPOTrainer(model=model, args=args, train_dataset=dataset, tokenizer=tokenizer, data_collator=data_collator)
     
     # 如果是初次训练resume_from_checkpoint为false，接着checkpoint继续训练，为True

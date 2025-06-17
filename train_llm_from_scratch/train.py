@@ -325,7 +325,7 @@ if __name__ == '__main__':
 
     config = Config()
     model = LLM(config)
-    print(f'模型参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}')
+    print(f'模型参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}') # 34M
 
     data_collator = DefaultDataCollator()
     tokenizer = AutoTokenizer.from_pretrained("./tokenizer", use_fast=True)
@@ -344,10 +344,9 @@ if __name__ == '__main__':
                             dataloader_num_workers=8,
                             dataloader_pin_memory=True,
                             save_safetensors=False)          
-    # TODO:
-    dataset = LLMDataset('./mobvoi_seq_monkey_general_open_corpus.jsonl', tokenizer=tokenizer, max_seq_len=512)
+    dataset = LLMDataset('./dataset/minimind_dataset/pretrain_hq.jsonl', tokenizer=tokenizer, max_seq_len=512)
     trainer = Trainer(model=model, args=args, train_dataset=dataset, tokenizer=tokenizer, data_collator=data_collator)
     # 如果是初次训练resume_from_checkpoint为false，接着checkpoint继续训练，为True
-    trainer.train(resume_from_checkpoint=False)
+    trainer.train(resume_from_checkpoint=True)
     trainer.save_model('./saves/model')
     trainer.save_state()

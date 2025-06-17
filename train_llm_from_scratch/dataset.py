@@ -65,22 +65,31 @@ class SFTDataset(Dataset):
     def __getitem__(self, index):
         line = self.data[index]
         line = json.loads(line)
-        instruction_text = line['instruction']
-        input_text = line['input']
-        output_text = line['output']
-        history = line['history']
-        query = instruction_text + input_text
-        answer = output_text + self.tokenizer.eos_token
-        messages = []
-        # 处理历史输入
-        if history:
-            for i in history:
-                messages.append({'role': 'user', 'content': i[0]})
-                messages.append({'role': 'assistant', 'content': i[1]})
+        conversations = line['conversations']
+        # input_text, output_text = conversations
+        # input_text = input_text['content']
+        # output_text = output_text['content']
+        # query = input_text
+        # answer = output_text+self.tokenizer.eos_token
+        # messages = []
+
+        # instruction_text = line['instruction']
+        # input_text = line['input']
+        # output_text = line['output']
+        # history = line['history']
+        # query = instruction_text + input_text
+        # answer = output_text + self.tokenizer.eos_token
+        # messages = []
+        # # 处理历史输入
+        # if history:
+        #     for i in history:
+        #         messages.append({'role': 'user', 'content': i[0]})
+        #         messages.append({'role': 'assistant', 'content': i[1]})
         
-        messages.append({'role': 'user', 'content': query})   
-        prompt = self.tokenizer.apply_chat_template(messages, tokenize=False) 
+        # messages.append({'role': 'user', 'content': query})   
+        prompt = self.tokenizer.apply_chat_template([conversations[0]], tokenize=False) 
         prompt_input_ids = self.tokenizer.encode(prompt)
+        answer = conversations[1]['content'] + self.tokenizer.eos_token
         answer_input_ids = self.tokenizer.encode(answer)
         input_ids = prompt_input_ids + answer_input_ids
         labels = [0] * len(prompt_input_ids) + answer_input_ids # 只计算模型回答的loss
@@ -135,13 +144,17 @@ class DPODataset(Dataset):
         self.tokenizer = tokenizer
         
         with open(self.data_path, 'r', encoding='utf-8') as f:
-            self.datas = json.load(f)
-        
+            self.datas = f.readlines()
+
     def __getitem__(self, index):
         sample = self.datas[index]
-        prompt = sample['prompt']
-        chosen = sample['chosen']
-        rejected = sample['rejected']
+        sample = json.loads(sample)
+        # prompt = sample['prompt']
+        # chosen = sample['chosen']
+        # rejected = sample['rejected']
+        prompt = sample['chosen'][0]['content']
+        chosen = sample['chosen'][1]['content']
+        rejected = sample['rejected'][1]['content']
         messages = [
             {"role": "user", "content": prompt}
         ]

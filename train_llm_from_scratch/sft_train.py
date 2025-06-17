@@ -22,8 +22,8 @@ from train import LLM, Config
 if __name__ == '__main__':
     AutoConfig.register("small_model", Config)
     AutoModelForCausalLM.register(Config, LLM)
-    model = AutoModelForCausalLM.from_pretrained('./saves/model')
-    print(f'模型参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}')
+    model = AutoModelForCausalLM.from_pretrained('./saves/model') # load pretrained model
+    print(f'模型参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}') # 38M
 
     data_collator = DefaultDataCollator()
     tokenizer = AutoTokenizer.from_pretrained("./tokenizer", use_fast=True)
@@ -42,7 +42,7 @@ if __name__ == '__main__':
                             dataloader_num_workers=1,
                             dataloader_pin_memory=True,
                             save_safetensors=False)          
-    dataset = SFTDataset('./sft_data_zh.jsonl', tokenizer=tokenizer, max_seq_len=1024)
+    dataset = SFTDataset('./dataset/minimind_dataset/sft_mini_512.jsonl', tokenizer=tokenizer, max_seq_len=512)
     trainer = Trainer(model=model, args=args, train_dataset=dataset, tokenizer=tokenizer, data_collator=data_collator)
     # 如果是初次训练resume_from_checkpoint为false，接着checkpoint继续训练，为True
     trainer.train(resume_from_checkpoint=False)

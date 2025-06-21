@@ -58,9 +58,14 @@ class DPOTrainer(Trainer):
         input_ids = inputs['input_ids']
         labels = inputs['labels']
 
+        # make sure ref model is on same device
+        device= input_ids.device
+        # move ref model for each batch, can be slow
+        ref_model.to(device)
+
         with torch.no_grad():
             ref_logits = ref_model(input_ids=input_ids, labels = labels).logits 
-        ref_probs = logits_to_probs(ref_logits, labels)  
+        ref_probs = logits_to_probs(ref_logits, labels) # (batch_size, seq_len, vocab_size) -> (batch_size, seq_len)
         ref_probs = mask_logits(ref_probs, labels) # pi_ref
 
         logits = model(input_ids=input_ids, labels = labels).logits
@@ -122,7 +127,8 @@ if __name__ == "__main__":
     model = AutoModelForCausalLM.from_pretrained('./saves/sft')
 
     print(f'模型可训练参数量为：{sum(p.numel() for p in model.parameters() if p.requires_grad)}') # 38M
-    ref_model = AutoModelForCausalLM.from_pretrained('./saves/sft').eval().to('cuda')
+    # ref_model = AutoModelForCausalLM.from_pretrained('./saves/sft').eval().to('cuda')
+    ref_model = AutoModelForCausalLM.from_pretrained('./saves/sft').eval() # to('cuda')  put ref model to cuda:0, but deepspeed need model to be distributed across all GPUs
     
     tokenizer = AutoTokenizer.from_pretrained("./tokenizer", use_fast=True)
     data_collator = DPODataCollator(tokenizer, max_seq_len=512) # 加载的大模型旋转位置编码最大长度为1024，这里不能超过这个值
@@ -137,7 +143,7 @@ if __name__ == "__main__":
                             save_total_limit=3,
                             bf16=True,
                             # learning_rate=0.00001,  # DPO学习率很重要!太大会把模型训飞
-                            learning_rate=0.000001,  # DPO学习率很重要!太大会把模型训飞
+                            learning_rate=0.000005,  # DPO学习率很重要!太大会把模型训飞
                             lr_scheduler_type='cosine',
                             dataloader_num_workers=1,
                             dataloader_pin_memory=True,

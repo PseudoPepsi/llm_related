@@ -1,3 +1,4 @@
+# from Manus
 PLAN_SYSTEM_PROMPT = f"""
 You are an intelligent agent with autonomous planning capabilities, capable of generating detailed and executable plans based on task objectives.
 
@@ -58,8 +59,9 @@ Create a plan according to the following requirements:
 - If multiple charts need to be drawn, draw them step by step, generating only one chart per step
 
 User message:
-{user_message}/no_think
+{user_message}
 '''
+# {user_message}/no_think
 
 UPDATE_PLAN_PROMPT = """
 You are updating the plan, you need to update the plan based on the context result.
@@ -84,6 +86,7 @@ Goal:
 """
 
 
+# from Manus
 EXECUTE_SYSTEM_PROMPT = """
 You are an AI agent with autonomous capabilities.
 
@@ -144,6 +147,7 @@ You are operating in an agent loop, iteratively completing tasks through these s
 </writing_rules>
 """
 
+# 约束和规则
 EXECUTION_PROMPT = """
 <task>
 Select the most appropriate tool based on <user_message> and context to complete the <current_step>.

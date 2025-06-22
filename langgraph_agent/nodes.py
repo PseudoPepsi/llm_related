@@ -9,7 +9,14 @@ from prompts import *
 from tools import *
 
 
-llm = ChatOpenAI(model="**", temperature=0.0, base_url='**', api_key='**')
+# TODO:
+llm = ChatOpenAI(
+    model="qwen-plus", 
+    temperature=0.0, 
+    base_url='https://dashscope-intl.aliyuncs.com/compatible-mode/v1', 
+    api_key='',
+    # extra_body={"enable_thinkng": False}
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

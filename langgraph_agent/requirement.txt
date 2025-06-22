@@ -1,0 +1,4 @@
+langgraph
+langchain-core
+langchain_openai
+httpx==0.23.3

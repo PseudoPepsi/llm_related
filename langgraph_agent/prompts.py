@@ -22,7 +22,6 @@ Operational Capabilities
 - Parse structured data (XLSX, CSV, XML)
 - Cleanse and transform datasets
 - Perform data analysis using Python libraries
-- Chinese font file path: SimSun.ttf 
 </execute_environment>
 """
 
@@ -165,7 +164,6 @@ Select the most appropriate tool based on <user_message> and context to complete
    - TOP10 filtering must specify sort criteria in comments
    - No custom data fields are allowed
 2. Code Requirements:
-   - Must use the specified font for plotting. Font path: *SimSun.ttf* 
    - The chart file name must reflect its actual content.
    - Must use *print* statements to display intermediate processes and results.
 </additional_rules>

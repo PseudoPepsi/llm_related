@@ -3,19 +3,23 @@ import logging
 from typing import Annotated, Literal
 from langchain_core.messages import AIMessage, HumanMessage,  SystemMessage, ToolMessage
 from langgraph.types import Command, interrupt
-from langchain_openai import ChatOpenAI
+from langchain_openai import AzureChatOpenAI
 from state import State
 from prompts import *
 from tools import *
 
 
-# TODO:
-llm = ChatOpenAI(
-    model="qwen-plus", 
-    temperature=0.0, 
-    base_url='https://dashscope-intl.aliyuncs.com/compatible-mode/v1', 
-    api_key='',
-    # extra_body={"enable_thinkng": False}
+api_key = os.getenv('ak')
+if not api_key:
+    raise ValueError("API key not found. Please set the 'ak' environment variable with your API key.")
+
+llm = AzureChatOpenAI(
+    azure_endpoint="",
+    openai_api_version="2024-03-01-preview",
+    model="gpt-35-turbo",
+    openai_api_key=api_key,
+    openai_api_type="azure",
+    max_tokens=1000,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,12 +96,14 @@ def execute_node(state: State):
     messages = state['observations'] + [SystemMessage(content=EXECUTE_SYSTEM_PROMPT), HumanMessage(content=EXECUTION_PROMPT.format(user_message=state['user_message'], step=current_step['description']))]
     
     tool_result = None
-    while True:
+    while True: # let model decide when to stop: if no tool calling is needed, stop and go to update current step
         response = llm.bind_tools([create_file, str_replace, shell_exec]).invoke(messages)
         response = response.model_dump_json(indent=4, exclude_none=True)
         response = json.loads(response)
         tools = {"create_file": create_file, "str_replace": str_replace, "shell_exec": shell_exec}     
         if response['tool_calls']:
+            # first add the AI message with tool_calls, then add the tool response messages, otherwise there's error
+            messages += [AIMessage(content=response.get('content', ''), tool_calls=response['tool_calls'])]
             for tool_call in response['tool_calls']:
                 tool_name = tool_call['name']
                 tool_args = tool_call['args']
@@ -112,6 +118,7 @@ def execute_node(state: State):
             
             tool_name = tool_call['name']
             tool_args = tool_call['args']
+            messages += [AIMessage(content=response['content'], tool_calls=[tool_call])]
             tool_result = tools[tool_name].invoke(tool_args)
             logger.info(f"tool_name:{tool_name},tool_args:{tool_args}\ntool_result:{tool_result}")
             messages += [ToolMessage(content=f"tool_name:{tool_name},tool_args:{tool_args}\ntool_result:{tool_result}", tool_call_id=tool_call['id'])]
@@ -119,10 +126,9 @@ def execute_node(state: State):
             break
         
     logger.info(f"当前STEP执行总结:{extract_answer(response['content'])}")
-    
+    # only add last response to state, to avoid too much unnecessary information
     state['messages'] += [AIMessage(content=extract_answer(response['content']))]
-    if tool_result:
-        state['observations'] += [ToolMessage(content=f"tool_name:{tool_name},tool_args:{tool_args}\ntool_result:{tool_result}", tool_call_id=tool_call['id'])]
+    # Only add AIMessage to observations, not ToolMessage (to avoid role errors)
     state['observations'] += [AIMessage(content=extract_answer(response['content']))]
     
     return Command(goto='update_planner', update={'plan': plan})
@@ -141,7 +147,8 @@ def report_node(state: State):
         response = response.model_dump_json(indent=4, exclude_none=True)
         response = json.loads(response)
         tools = {"create_file": create_file, "shell_exec": shell_exec} 
-        if response['tool_calls']:    
+        if response['tool_calls']:
+            messages += [AIMessage(content=response.get('content', ''), tool_calls=response['tool_calls'])]
             for tool_call in response['tool_calls']:
                 tool_name = tool_call['name']
                 tool_args = tool_call['args']

@@ -1,3 +1,7 @@
+# -*- coding: utf-8 -*-
+"""
+使用langgraph框架搭建agent，实现简易版manus，专用于数据分析报告自动生成。
+"""
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
 from state import State
@@ -44,3 +48,7 @@ inputs = {"user_message": "对所给文档进行分析，生成分析报告，�
           "final_report": ""}
 
 graph.invoke(inputs, {"recursion_limit":100})
+
+"""
+python graph.py 2>&1 | tee "test.log"
+"""
